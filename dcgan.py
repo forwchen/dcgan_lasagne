@@ -1,3 +1,7 @@
+import sys
+import os
+import time
+
 import lasagne
 import theano
 import theano.tensor as T
@@ -182,7 +186,7 @@ def iterate_minibatches(inputs, batchsize, shuffle=False):
 
 
 
-def main():
+def main(num_epochs=100):
     X_train, X_test = load_dataset()
     real_data = T.tensor4('real')
     fake_data = T.tensor4('fake')
@@ -192,13 +196,51 @@ def main():
     D1 = build_dis(real_data, p_dis)
     G = build_gen(fake_data)
 
-    D2 = build_dis(get_output(G), p_dis)
+    gen_data = get_output(G)
+    D2 = build_dis(gen_data, p_dis)
 
     D_loss = get_dis_loss(get_output(D1), get_output(D2))
     G_loss = get_gen_loss(get_output(G))
 
+    params_d = lasagne.layers.get_all_params(D1, trainable=True)
 
-    # params = lasagne.layers.get_all_params(, trainable=True)
+    # to make sure the params are shared between D1 & D2
+    # params_d2 = lasagne.layers.get_all_params(D2, trainable=True)
+    # print [id(p) for p in params_d]
+    # print [id(p) for p in params_d2]
+
+    params_g = lasagne.layers.get_all_params(G, trainable=True)
+
+    lr_g = 0.01
+    lr_d = 0.001
+
+    updates_d = lasagne.updates.adam(D_loss, params_d, learning_rate=lr_d)
+    updates_g = lasagne.updates.adam(G_loss, params_g, learning_rate=lr_g)
+
+    train_fn_g = theano.function([fake_data], G_loss, updates=updates_g)
+    train_fn_d = theano.function([real_data, fake_data], D_loss, updates=updates_d)
+
+    print 'Start training...'
+    for epoch in range(num_epochs):
+        train_err_g = 0
+        train_err_d = 0
+
+        train_batches = 0
+        start_time = time.time()
+        for batch in iterate_minibatches(X_train, batch_size, shuffle=True):
+            f_data = np.array(np.random.uniform(-1, 1, (batch_size, 100, 1, 1)), dtype=theano.config.floatX)
+
+            train_err_g += train_fn_g(f_data)
+            train_err_d += train_fn_d(batch, f_data)
+
+            train_batches += 1
+
+        print "Epoch {} of {} took {:.3f}s".format(
+            epoch + 1, num_epochs, time.time() - start_time)
+
+        print "  training loss g:\t\t{:.6f}".format(train_err_g / train_batches)
+        print "  training loss d:\t\t{:.6f}".format(train_err_d / train_batches)
+
 
 if __name__ == '__main__':
     main()
