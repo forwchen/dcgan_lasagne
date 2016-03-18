@@ -6,6 +6,7 @@ import lasagne
 import theano
 import theano.tensor as T
 import numpy as np
+from numpy.random import RandomState
 from lasagne.layers import get_output
 from lasagne.regularization import regularize_network_params,l2
 from PIL import Image
@@ -16,7 +17,97 @@ from theano.sandbox.cuda.basic_ops import (as_cuda_ndarray_variable,
                                            gpu_alloc_empty)
 from theano.sandbox.cuda.dnn import GpuDnnConvDesc, GpuDnnConv, GpuDnnConvGradI, dnn_conv, dnn_pool
 
+seed = 42
+np_rng = RandomState(seed)
 batch_size = 64
+
+def l2norm(x, axis=1, e=1e-8, keepdims=True):
+    return T.sqrt(T.sum(T.sqr(x), axis=axis, keepdims=keepdims) + e)
+
+def floatX(X):
+    return np.asarray(X, dtype=theano.config.floatX)
+
+def sharedX(X, dtype=theano.config.floatX, name=None):
+    return theano.shared(np.asarray(X, dtype=dtype), name=name)
+
+def clip_norm(g, c, n):
+    if c > 0:
+        g = T.switch(T.ge(n, c), g*c/n, g)
+    return g
+
+def clip_norms(gs, c):
+    norm = T.sqrt(sum([T.sum(g**2) for g in gs]))
+    return [clip_norm(g, c, norm) for g in gs]
+
+class Regularizer(object):
+
+    def __init__(self, l1=0., l2=0., maxnorm=0., l2norm=False, frobnorm=False):
+        self.__dict__.update(locals())
+
+    def max_norm(self, p, maxnorm):
+        if maxnorm > 0:
+            norms = T.sqrt(T.sum(T.sqr(p), axis=0))
+            desired = T.clip(norms, 0, maxnorm)
+            p = p * (desired/ (1e-7 + norms))
+        return p
+
+    def l2_norm(self, p):
+        return p/l2norm(p, axis=0)
+
+    def frob_norm(self, p, nrows):
+        return (p/T.sqrt(T.sum(T.sqr(p))))*T.sqrt(nrows)
+
+    def gradient_regularize(self, p, g):
+        g += p * self.l2
+        g += T.sgn(p) * self.l1
+        return g
+
+    def weight_regularize(self, p):
+        p = self.max_norm(p, self.maxnorm)
+        if self.l2norm:
+            p = self.l2_norm(p)
+        if self.frobnorm > 0:
+            p = self.frob_norm(p, self.frobnorm)
+        return p
+
+
+class Update(object):
+
+    def __init__(self, regularizer=Regularizer(), clipnorm=0.):
+        self.__dict__.update(locals())
+
+    def __call__(self, params, grads):
+        raise NotImplementedError
+
+class Adam(Update):
+
+    def __init__(self, lr=0.001, b1=0.9, b2=0.999, e=1e-8, l=1-1e-8, *args, **kwargs):
+        Update.__init__(self, *args, **kwargs)
+        self.__dict__.update(locals())
+
+    def __call__(self, params, cost):
+        updates = []
+        grads = T.grad(cost, params)
+        grads = clip_norms(grads, self.clipnorm)
+        t = theano.shared(floatX(1.))
+        b1_t = self.b1*self.l**(t-1)
+
+        for p, g in zip(params, grads):
+            g = self.regularizer.gradient_regularize(p, g)
+            m = theano.shared(p.get_value() * 0.)
+            v = theano.shared(p.get_value() * 0.)
+
+            m_t = b1_t*m + (1 - b1_t)*g
+            v_t = self.b2*v + (1 - self.b2)*g**2
+            m_c = m_t / (1-self.b1**t)
+            v_c = v_t / (1-self.b2**t)
+            p_t = p - (self.lr * m_c) / (T.sqrt(v_c) + self.e)
+            p_t = self.regularizer.weight_regularize(p_t)
+            updates.append((m, m_t))
+            updates.append((v, v_t))
+            updates.append((p, p_t) )
+        updates.append((t, t + 1.))
+        return updates
 
 
 class Deconv2DLayer(lasagne.layers.Layer):
@@ -70,7 +161,7 @@ def load_dataset():
 
 def build_gen(input_var=None):
 
-    net = lasagne.layers.InputLayer(shape=(batch_size, 100, 1, 1),
+    net = lasagne.layers.InputLayer(shape=(batch_size, 512, 1, 1),
                                     input_var=input_var)
 
     net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
@@ -103,7 +194,7 @@ def build_gen(input_var=None):
     return net
 
 def build_gen2(input_var=None):
-    net = lasagne.layers.InputLayer(shape=(batch_size, 100, 1, 1),
+    net = lasagne.layers.InputLayer(shape=(batch_size, 512, 1, 1),
                                     input_var=input_var)
 
     net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
@@ -145,23 +236,25 @@ def build_dis_init(input_var=None):
             pad='same')
 
     net = lasagne.layers.BatchNormLayer(net)
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.Conv2DLayer(
             net, num_filters=64, filter_size=(5, 5), stride=2,
-            nonlinearity=lasagne.nonlinearities.rectify,
+            #nonlinearity=lasagne.nonlinearities.rectify,
+            nonlinearity=None,
             pad='same')
 
     net = lasagne.layers.BatchNormLayer(net)
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.Conv2DLayer(
             net, num_filters=128, filter_size=(5, 5),
-            nonlinearity=lasagne.nonlinearities.rectify,
+            #nonlinearity=lasagne.nonlinearities.rectify,
+            nonlinearity=None,
             pad='valid')
 
     net = lasagne.layers.BatchNormLayer(net)
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.DenseLayer(
             lasagne.layers.dropout(net, p=0.9),
@@ -195,11 +288,11 @@ def build_dis(input_var=None, p_dis=None):
             beta=p_dis[2],
             gamma=p_dis[3])
 
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.Conv2DLayer(
             net, num_filters=64, filter_size=(5, 5), stride=2,
-            nonlinearity=lasagne.nonlinearities.rectify,
+            nonlinearity=None,
             W=p_dis[4],
             b=p_dis[5],
             pad='same')
@@ -209,11 +302,11 @@ def build_dis(input_var=None, p_dis=None):
             beta=p_dis[6],
             gamma=p_dis[7])
 
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.Conv2DLayer(
             net, num_filters=128, filter_size=(5, 5),
-            nonlinearity=lasagne.nonlinearities.rectify,
+            nonlinearity=None,
             W=p_dis[8],
             b=p_dis[9],
             pad='valid')
@@ -223,7 +316,7 @@ def build_dis(input_var=None, p_dis=None):
             beta=p_dis[10],
             gamma=p_dis[11])
 
-    net = lasagne.layers.NonlinearityLayer(net)
+    net = lasagne.layers.NonlinearityLayer(net, lasagne.nonlinearities.LeakyRectify(0.2))
 
     net = lasagne.layers.DenseLayer(
             lasagne.layers.dropout(net, p=0.9),
@@ -239,11 +332,16 @@ def build_dis(input_var=None, p_dis=None):
 
 
 def get_gen_loss(D2):
-    return T.mean(T.nnet.relu(D2) - D2 + T.log(1.0 + T.exp(-T.abs_(D2))))
+    # return T.mean(T.nnet.relu(D2) - D2 + T.log(1.0 + T.exp(-T.abs_(D2))))
+    return T.nnet.binary_crossentropy(D2, T.ones(D2.shape)).mean()
+
 
 def get_dis_loss(D1, D2):
-    return T.mean(T.nnet.relu(D1) - D1 + T.log(1.0 + T.exp(-T.abs_(D1)))) + \
-        T.mean(T.nnet.relu(D2) - D2 + T.log(1.0 + T.exp(-T.abs_(D2))))
+    # return T.mean(T.nnet.relu(D1) - D1 + T.log(1.0 + T.exp(-T.abs_(D1)))) + \
+        # T.mean(T.nnet.relu(D2) - D2 + T.log(1.0 + T.exp(-T.abs_(D2))))
+
+    return T.nnet.binary_crossentropy(D1, T.ones(D1.shape)).mean() + \
+        T.nnet.binary_crossentropy(D2, T.zeros(D2.shape)).mean()
 
 def iterate_minibatches(inputs, batchsize, shuffle=False):
     if shuffle:
@@ -258,7 +356,7 @@ def iterate_minibatches(inputs, batchsize, shuffle=False):
 
 
 
-def main(num_epochs=2):
+def main(num_epochs=20):
     X_train, X_test = load_dataset()
     real_data = T.tensor4('real')
     fake_data = T.tensor4('fake')
@@ -272,7 +370,7 @@ def main(num_epochs=2):
     D2 = build_dis(gen_data, p_dis)
 
     D_loss = get_dis_loss(get_output(D1), get_output(D2))
-    G_loss = get_gen_loss(get_output(G))
+    G_loss = get_gen_loss(get_output(D2))
 
     params_d = lasagne.layers.get_all_params(D1, trainable=True)
 
@@ -283,14 +381,21 @@ def main(num_epochs=2):
 
     params_g = lasagne.layers.get_all_params(G, trainable=True)
 
-    D_loss += regularize_network_params(D1, l2)
-    G_loss += regularize_network_params(G, l2)
+    # G_loss += regularize_network_params(G, l2)
+    # D_loss += regularize_network_params(D1, l2)
 
-    lr_g = 0.0002
-    lr_d = 0.0002
+    # lr_g = 0.0002
+    # lr_d = 0.0002
 
-    updates_d = lasagne.updates.adam(D_loss, params_d, learning_rate=lr_d)
-    updates_g = lasagne.updates.adam(G_loss, params_g, learning_rate=lr_g)
+    lrt = sharedX(0.0002)
+    d_updater = Adam(lr=lrt, b1=0.5, regularizer=Regularizer(l2=2.5e-5))
+    g_updater = Adam(lr=lrt, b1=0.5, regularizer=Regularizer(l2=2.5e-5))
+
+    # updates_d = lasagne.updates.adam(D_loss, params_d, learning_rate=lr_d)
+    # updates_g = lasagne.updates.adam(G_loss, params_g, learning_rate=lr_g)
+    updates_d = d_updater(params_d, D_loss)
+    updates_g = g_updater(params_g, G_loss)
+
 
     train_fn_g = theano.function([fake_data], G_loss, updates=updates_g)
     train_fn_d = theano.function([real_data, fake_data], D_loss, updates=updates_d)
@@ -307,7 +412,7 @@ def main(num_epochs=2):
         train_batches = 0
         start_time = time.time()
         for batch in iterate_minibatches(X_train, batch_size, shuffle=True):
-            f_data = np.array(np.random.uniform(-1, 1, (batch_size, 100, 1, 1)), dtype=theano.config.floatX)
+            f_data = np.array(np.random.uniform(-1, 1, (batch_size, 512, 1, 1)), dtype=theano.config.floatX)
 
             if train_batches % (k+1) == 0:
                 train_err_g += train_fn_g(f_data)
@@ -318,16 +423,16 @@ def main(num_epochs=2):
             # if train_batches > 300:
             #     break
 
-        # print "Epoch {} of {} took {:.3f}s".format(
-        #     epoch + 1, num_epochs, time.time() - start_time)
+        print "Epoch {} of {} took {:.3f}s".format(
+            epoch + 1, num_epochs, time.time() - start_time)
 
-        # print "  training loss g:\t\t{:.6f}".format(train_err_g / train_batches)
-        # print "  training loss d:\t\t{:.6f}".format(train_err_d / train_batches)
+        print "  training loss g:\t\t{:.6f}".format(train_err_g / train_batches)
+        print "  training loss d:\t\t{:.6f}".format(train_err_d / train_batches)
 
     # generate 1 batch of samples to see how well the network learns
     rescale = 4
     for i in xrange(1):
-        f_data = np.array(np.random.uniform(-1, 1, (batch_size, 100, 1, 1)), dtype=theano.config.floatX)
+        f_data = np.array(np.random.uniform(-1, 1, (batch_size, 512, 1, 1)), dtype=theano.config.floatX)
         print f_data[1]
         g_data = gen(f_data)
         print g_data[1]
