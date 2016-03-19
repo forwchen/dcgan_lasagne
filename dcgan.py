@@ -228,7 +228,7 @@ def iterate_minibatches(inputs, batchsize, shuffle=False):
 
 
 
-def main(num_epochs=20):
+def main(num_epochs=100):
     X_train, X_test = load_dataset()
     real_data = T.tensor4('real')
     fake_data = T.tensor4('fake')
