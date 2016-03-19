@@ -160,40 +160,6 @@ def load_dataset():
 
 
 def build_gen(input_var=None):
-
-    net = lasagne.layers.InputLayer(shape=(batch_size, 1024, 1, 1),
-                                    input_var=input_var)
-
-    net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
-            net, num_filters=1024, filter_size=(3, 3),
-            nonlinearity=lasagne.nonlinearities.rectify,
-            pad='full'))
-
-    net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
-            net, num_filters=128, filter_size=(5, 5),
-            nonlinearity=lasagne.nonlinearities.rectify,
-            pad='full'))
-
-    net = lasagne.layers.Upscale2DLayer(net, scale_factor=2)
-
-    net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
-            net, num_filters=64, filter_size=(5, 5),
-            nonlinearity=lasagne.nonlinearities.rectify,
-            pad='same'))
-
-    net = lasagne.layers.Upscale2DLayer(net, scale_factor=2)
-
-    net = lasagne.layers.batch_norm(lasagne.layers.Conv2DLayer(
-            net, num_filters=1, filter_size=(5, 5),
-            nonlinearity=lasagne.nonlinearities.sigmoid,
-            pad='same'))
-
-    print [l.__class__.__name__ for l in lasagne.layers.get_all_layers(net)]
-    print net.output_shape
-
-    return net
-
-def build_gen2(input_var=None):
     net = lasagne.layers.InputLayer(shape=(batch_size, 1024, 1, 1),
                                     input_var=input_var)
 
@@ -364,7 +330,7 @@ def main(num_epochs=20):
     p_dis = build_dis_init() # just to create weights
 
     D1 = build_dis(real_data, p_dis)
-    G = build_gen2(fake_data)
+    G = build_gen(fake_data)
 
     gen_data = get_output(G)
     D2 = build_dis(gen_data, p_dis)
@@ -372,6 +338,7 @@ def main(num_epochs=20):
     D_loss = get_dis_loss(get_output(D1), get_output(D2))
     G_loss = get_gen_loss(get_output(D2))
 
+    params_g = lasagne.layers.get_all_params(G, trainable=True)
     params_d = lasagne.layers.get_all_params(D1, trainable=True)
 
     # to make sure the params are shared between D1 & D2
@@ -379,23 +346,18 @@ def main(num_epochs=20):
     # print [id(p) for p in params_d]
     # print [id(p) for p in params_d2]
 
-    params_g = lasagne.layers.get_all_params(G, trainable=True)
-
-    # G_loss += regularize_network_params(G, l2)
-    # D_loss += regularize_network_params(D1, l2)
-
-    # lr_g = 0.0002
-    # lr_d = 0.0002
-
     lrt = sharedX(0.0002)
     d_updater = Adam(lr=lrt, b1=0.5, regularizer=Regularizer(l2=2.5e-5))
     g_updater = Adam(lr=lrt, b1=0.5, regularizer=Regularizer(l2=2.5e-5))
-
-    # updates_d = lasagne.updates.adam(D_loss, params_d, learning_rate=lr_d)
-    # updates_g = lasagne.updates.adam(G_loss, params_g, learning_rate=lr_g)
     updates_d = d_updater(params_d, D_loss)
     updates_g = g_updater(params_g, G_loss)
 
+    # lr_g = 0.0002
+    # lr_d = 0.0002
+    # G_loss += regularize_network_params(G, l2)
+    # D_loss += regularize_network_params(D1, l2)
+    # updates_d = lasagne.updates.adam(D_loss, params_d, learning_rate=lr_d)
+    # updates_g = lasagne.updates.adam(G_loss, params_g, learning_rate=lr_g)
 
     train_fn_g = theano.function([fake_data], G_loss, updates=updates_g)
     train_fn_d = theano.function([real_data, fake_data], D_loss, updates=updates_d)
@@ -420,8 +382,7 @@ def main(num_epochs=20):
                 train_err_d += train_fn_d(batch, f_data)
 
             train_batches += 1
-            # if train_batches > 300:
-            #     break
+
 
         print "Epoch {} of {} took {:.3f}s".format(
             epoch + 1, num_epochs, time.time() - start_time)
@@ -429,13 +390,11 @@ def main(num_epochs=20):
         print "  training loss g:\t\t{:.6f}".format(train_err_g / train_batches)
         print "  training loss d:\t\t{:.6f}".format(train_err_d / train_batches)
 
-    # generate 1 batch of samples to see how well the network learns
+        # generate 1 batch of samples to see how well the network learns at every epoch
         rescale = 4
         for i in xrange(1):
             f_data = np.array(np.random.uniform(-1, 1, (batch_size, 1024, 1, 1)), dtype=theano.config.floatX)
-            # print f_data[1]
             g_data = gen(f_data)
-            # print g_data[1]
             for j in xrange(batch_size):
                 img = g_data[j].reshape(28, 28)*256
                 img = img.repeat(rescale, axis = 0).repeat(rescale, axis = 1).astype(np.uint8())
@@ -447,4 +406,3 @@ def main(num_epochs=20):
 
 if __name__ == '__main__':
     main()
-    # build_gen2()
