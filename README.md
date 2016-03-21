@@ -1,6 +1,6 @@
 #DCGAN
 
-original python impl: [https://github.com/Newmu/dcgan_code]()
+original python impl: https://github.com/Newmu/dcgan_code
 
 sample output@20th epoch:
 
